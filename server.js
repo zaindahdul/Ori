@@ -11,12 +11,12 @@ loadEnv(path.join(__dirname, '.env'));
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = '127.0.0.1';
-const MODEL = (process.env.ORI_MODEL || '').trim() || 'gemini-flash-latest';
+const MODEL = (process.env.ORI_MODEL || '').trim() || 'llama-3.3-70b-versatile';
 // When the main model is overloaded (it often is, briefly), Ori quietly tries these next.
-const FALLBACK_MODELS = (process.env.ORI_FALLBACK_MODELS || 'gemini-3.6-flash,gemini-3.5-flash,gemini-flash-lite-latest')
+const FALLBACK_MODELS = (process.env.ORI_FALLBACK_MODELS || 'openai/gpt-oss-120b,llama-3.1-8b-instant')
   .split(',').map((m) => m.trim()).filter((m) => m && m !== MODEL);
 const MODELS = [MODEL].concat(FALLBACK_MODELS);
-const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
+const API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const MAX_TOKENS = 4096;
 const MAX_BODY_BYTES = 1000000;
 const MAX_MESSAGES = 40;
@@ -103,7 +103,7 @@ function loadEnv(file) {
 }
 
 function apiKey() {
-  return (process.env.GEMINI_API_KEY || '').trim();
+  return (process.env.GROQ_API_KEY || '').trim();
 }
 
 function sendJson(res, status, data) {
@@ -153,9 +153,9 @@ function cleanMessages(input) {
   return messages;
 }
 
-// Turn the service's "Please retry in 28m9.4s" into "about 29 minutes".
+// Turn the service's "Please try again in 28m9.4s" into "about 29 minutes".
 function retryHint(detail) {
-  const match = /retry in\s+(?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/i.exec(detail);
+  const match = /(?:retry|try again) in\s+(?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/i.exec(detail);
   if (!match || !match[0].trim().match(/\d/)) return '';
   const seconds = Number(match[1] || 0) * 3600 + Number(match[2] || 0) * 60 + Number(match[3] || 0);
   if (seconds < 60) return seconds <= 1 ? 'a second' : 'about ' + Math.ceil(seconds) + ' seconds';
@@ -175,7 +175,7 @@ async function handleChat(req, res) {
 
   const key = apiKey();
   if (!key) {
-    sendJson(res, 500, { error: 'No API key yet. Add GEMINI_API_KEY to the .env file, then restart the server.' });
+    sendJson(res, 500, { error: 'No API key yet. Add GROQ_API_KEY to the .env file, then restart the server.' });
     return;
   }
 
@@ -201,26 +201,24 @@ async function handleChat(req, res) {
   const abort = new AbortController();
   res.on('close', () => abort.abort());
 
-  const body = JSON.stringify({
-    system_instruction: { parts: [{ text: SYSTEM }] },
-    contents: messages.map((m) => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }]
-    })),
-    generationConfig: { maxOutputTokens: MAX_TOKENS }
-  });
+  const chat = [{ role: 'system', content: SYSTEM }].concat(messages);
 
   // Try each model in turn; a busy, rate-limited or retired model hands over to the next.
   let upstream;
   for (let i = 0; i < MODELS.length; i += 1) {
     try {
-      upstream = await fetch(API_BASE + encodeURIComponent(MODELS[i]) + ':streamGenerateContent?alt=sse', {
+      upstream = await fetch(API_URL, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-goog-api-key': key
+          'authorization': 'Bearer ' + key
         },
-        body: body,
+        body: JSON.stringify({
+          model: MODELS[i],
+          messages: chat,
+          max_completion_tokens: MAX_TOKENS,
+          stream: true
+        }),
         signal: abort.signal
       });
     } catch (err) {
@@ -242,7 +240,7 @@ async function handleChat(req, res) {
       detail = (data && data.error && data.error.message) || '';
     } catch (err) { /* no readable error body */ }
     let message = detail || 'The AI service returned an error (' + upstream.status + ').';
-    if (upstream.status === 401 || upstream.status === 403 || /API key not valid/i.test(detail)) {
+    if (upstream.status === 401 || upstream.status === 403 || /invalid api key/i.test(detail)) {
       message = 'The API key in .env was rejected. Check it, then restart the server.';
     } else if (upstream.status === 429) {
       const wait = retryHint(detail);
@@ -283,11 +281,8 @@ async function handleChat(req, res) {
           console.error('AI stream error: ' + (event.error.message || 'unknown'));
           continue;
         }
-        const candidate = event.candidates && event.candidates[0];
-        const parts = (candidate && candidate.content && candidate.content.parts) || [];
-        for (const part of parts) {
-          if (typeof part.text === 'string' && !part.thought) res.write(part.text);
-        }
+        const delta = event.choices && event.choices[0] && event.choices[0].delta;
+        if (delta && typeof delta.content === 'string' && delta.content) res.write(delta.content);
       }
     }
   } catch (err) {
@@ -344,6 +339,6 @@ server.on('error', (err) => {
 server.listen(PORT, HOST, () => {
   console.log('OrielAi is running at http://localhost:' + PORT);
   if (!apiKey()) {
-    console.log('No API key found. Add GEMINI_API_KEY to .env and restart to let Ori answer.');
+    console.log('No API key found. Add GROQ_API_KEY to .env and restart to let Ori answer.');
   }
 });
