@@ -2,7 +2,7 @@
   "name": "ori",
   "version": "1.0.0",
   "private": true,
-  "description": "ORI - a minimal chat assistant",
+  "description": "OrielAi - Ori, a thinking partner that keeps the judgment yours",
   "scripts": {
     "start": "node server.js"
   },
